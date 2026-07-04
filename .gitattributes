@@ -1,0 +1,19 @@
+# Normalise line endings in the repo to LF; check out native on each platform.
+* text=auto
+*.cs text
+*.csproj text
+*.props text
+*.targets text
+*.slnx text
+*.yml text
+*.md text
+
+# Binary fixtures (e.g. golden .lz test files) must never be munged.
+*.lz binary
+*.ser binary
+*.gz binary
+*.png binary
+*.tif binary
+*.tiff binary
+*.ttf binary
+*.ico binary
