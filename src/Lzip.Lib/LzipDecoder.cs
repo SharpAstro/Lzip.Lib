@@ -182,11 +182,7 @@ public static class LzipDecoder
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint DecodeDictSize(byte ds)
-    {
-        uint d = 1u << (ds & 0x1F);
-        return d - (d >> 4) * ((uint)(ds >> 5) & 7);
-    }
+    private static uint DecodeDictSize(byte ds) => LzipFraming.DecodeDictSize(ds);
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void DecodeLzma(ReadOnlySpan<byte> input, byte[] output, int outputOffset, int outputLength)

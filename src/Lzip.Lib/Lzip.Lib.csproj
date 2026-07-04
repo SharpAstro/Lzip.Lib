@@ -10,10 +10,10 @@
     <!-- AssemblyVersion fixed at major.minor.0.0; the NuGet package version is composed in
          CI via $(VERSION_PREFIX)$(VERSION_REV)+$(VERSION_HASH). Bump VersionPrefix here on
          minor feature additions / breaking changes; CI's run_number drives the patch. -->
-    <VersionPrefix>1.0.0</VersionPrefix>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <VersionPrefix>1.1.0</VersionPrefix>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
     <PackageId>Lzip.Lib</PackageId>
-    <Description>Pure-managed lzip (LZMA1) codec: a fast, AOT/trim-friendly decompressor for the lzip container format, including multi-member files with parallel decode. Decoder only in 1.0; an encoder follows. No external lzip binary required.</Description>
+    <Description>Pure-managed lzip (LZMA1) codec: a fast, AOT/trim-friendly compressor and decompressor for the lzip container format, including multi-member files with parallel decode and -b-style member splitting. Output is read by the reference lzip binary. No external lzip binary required.</Description>
     <PackageTags>lzip;lzma;lzma1;compression;decompression;codec;aot</PackageTags>
     <Authors>Sebastian Godelet</Authors>
     <PackageLicenseFile>LICENSE</PackageLicenseFile>
