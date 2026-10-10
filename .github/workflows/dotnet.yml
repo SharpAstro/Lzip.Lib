@@ -44,6 +44,8 @@ jobs:
       run: dotnet restore
     - name: Build
       run: dotnet build -c $BUILD_CONF --no-restore -p:Version=${VERSION_PREFIX}${VERSION_REV}${VERSION_HASH} -p:FileVersion=${VERSION_PREFIX}.${VERSION_REV} -p:ContinuousIntegrationBuild=true
+    - name: Install the reference lzip (the encoder tests' oracle)
+      run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends lzip
     - name: Test
       run: dotnet test src/Lzip.Lib.Tests -c $BUILD_CONF --no-build --logger "console;verbosity=detailed"
     - name: Upload NuGet package

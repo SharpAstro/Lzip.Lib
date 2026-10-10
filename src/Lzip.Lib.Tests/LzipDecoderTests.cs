@@ -58,7 +58,8 @@ public class LzipDecoderTests
     [Fact]
     public void DecompressToStream_YieldsSameBytes()
     {
-        using var output = LzipDecoder.DecompressToStream(File.OpenRead(FixturePath("single.lz")));
+        using var input = File.OpenRead(FixturePath("single.lz"));
+        using var output = LzipDecoder.DecompressToStream(input);
         output.ToArray().ShouldBe(SingleExpected());
     }
 }

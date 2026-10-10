@@ -80,6 +80,37 @@ public class LzipEncoderTests
         LzipDecoder.Decompress(output.ToArray()).ShouldBe(data);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Compress_StreamOverload_ReadsFromPositionToTheEnd_WhateverTheStream(bool memoryStream)
+    {
+        // a MemoryStream used to be read whole from offset 0 and left where it was; any other stream from its
+        // position to its end, left at the end, which is also how LzipDecoder.Decompress(Stream) reads
+        byte[] data = Pseudorandom(1000);
+        using var memory = new MemoryStream(data);
+        using Stream input = memoryStream ? memory : new BufferedStream(memory);
+        input.Position = 600;
+        using var output = new MemoryStream();
+        LzipEncoder.Compress(input, output);
+
+        LzipDecoder.Decompress(output.ToArray()).ShouldBe(data[600..]);
+        input.Position.ShouldBe(input.Length);
+    }
+
+    [Fact]
+    public void Compress_AnExplicitDictionaryIsCappedToTheInput_AsADerivedOneIs()
+    {
+        // lzip -s is a LIMIT: a 512 MiB dictionary on 8.8 kB of text once declared 512 MiB, and the match finder
+        // allocated for it
+        byte[] data = Payload("text");
+        byte[] explicitDict = LzipEncoder.Compress(data, new LzipOptions { DictionarySize = 1 << 29 });
+        byte[] derived = LzipEncoder.Compress(data, new LzipOptions { Level = 9 });
+
+        LzipFraming.DecodeDictSize(explicitDict[5]).ShouldBe(LzipFraming.DecodeDictSize(derived[5]));
+        LzipDecoder.Decompress(explicitDict).ShouldBe(data);
+    }
+
     // ---- framing sanity ----
 
     [Fact]
@@ -157,6 +188,9 @@ public class LzipEncoderTests
         var (integrityOk, exit, _) = await TryRunLzipAsync("-t", compressed);
         if (!integrityOk)
         {
+            // CI installs lzip (dotnet.yml), so there a missing binary is a broken step, not a reason to skip: four
+            // skips a run were how CI checked the encoder only against our own decoder
+            Assert.False(Environment.GetEnvironmentVariable("CI") == "true", "lzip is not on PATH in CI; the oracle cannot run.");
             Assert.Skip("lzip binary not found on PATH; skipping oracle cross-decode.");
         }
         exit.ShouldBe(0, "real lzip -t rejected our output");

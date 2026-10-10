@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using System.Threading.Tasks;
 
 namespace SharpAstro.Lzip;
@@ -17,6 +18,9 @@ namespace SharpAstro.Lzip;
 /// Trailer: CRC32 (4) + data size (8) + member size (8).
 /// LZMA uses fixed properties for lzip: lc=3, lp=0, pb=2.
 /// Multi-member files concatenate independent members that can be decompressed in parallel.
+/// A member is believed only once its trailer agrees with what was decoded (the CRC32, the data size and the member
+/// size, as the reference <c>lzip</c> checks them); anything else, a corrupt payload included, is an
+/// <see cref="InvalidDataException"/>.
 /// </remarks>
 public static class LzipDecoder
 {
@@ -78,13 +82,20 @@ public static class LzipDecoder
             cumOffset += (int)members[i].DataSize;
         }
 
-        Parallel.For(0, members.Length, i =>
+        try
         {
-            var m = members[i];
-            uint dictSize = DecodeDictSize(data[m.Offset + 5]);
-            ReadOnlySpan<byte> lzma = data.AsSpan(m.Offset + HeaderSize, m.Length - MinMemberSize);
-            DecodeLzma(lzma, output, outputOffsets[i], (int)m.DataSize);
-        });
+            Parallel.For(0, members.Length, i =>
+            {
+                var m = members[i];
+                DecodeMember(data.AsSpan(m.Offset, m.Length), output, outputOffsets[i], (int)m.DataSize);
+            });
+        }
+        catch (AggregateException ae) when (ae.InnerExceptions.Count > 0)
+        {
+            // Parallel.For wraps what a member threw: a corrupt member is the caller's InvalidDataException here
+            // as on the single-member path, not a wrapper around it
+            ExceptionDispatchInfo.Throw(ae.InnerExceptions[0]);
+        }
 
         return output;
     }
@@ -111,6 +122,11 @@ public static class LzipDecoder
         return Decompress(array, 0, array.Length);
     }
 
+    /// <summary>
+    /// Decompresses all of <paramref name="input"/>, from its position to its end, into a read-only
+    /// <see cref="MemoryStream"/>. The whole output is decoded before this returns (nothing is lazy), and
+    /// <paramref name="input"/> is not disposed.
+    /// </summary>
     public static MemoryStream DecompressToStream(Stream input)
     {
         return new MemoryStream(Decompress(input), writable: false);
@@ -118,14 +134,39 @@ public static class LzipDecoder
 
     private static byte[] DecompressSingleMember(ReadOnlySpan<byte> data)
     {
-        long dataSize = BinaryPrimitives.ReadInt64LittleEndian(data[^16..^8]);
+        long dataSize = ReadDataSize(data);
 
         byte[] output = new byte[checked((int)dataSize)];
-        ReadOnlySpan<byte> lzma = data[HeaderSize..^TrailerSize];
-
-        DecodeLzma(lzma, output, 0, output.Length);
+        DecodeMember(data, output, 0, output.Length);
 
         return output;
+    }
+
+    // The trailer's data size, which sizes the output before anything is decoded; DecodeLzma then holds the stream
+    // to it
+    private static long ReadDataSize(ReadOnlySpan<byte> member)
+    {
+        long dataSize = BinaryPrimitives.ReadInt64LittleEndian(member[^16..^8]);
+        if (dataSize < 0)
+        {
+            throw new InvalidDataException($"Invalid lzip data size: {dataSize}.");
+        }
+        return dataSize;
+    }
+
+    // One whole member (header, LZMA stream and trailer) into output[outputOffset..+outputLength], believed only once
+    // the decoded bytes match the trailer's CRC32
+    private static void DecodeMember(ReadOnlySpan<byte> member, byte[] output, int outputOffset, int outputLength)
+    {
+        uint dictSize = DecodeDictSize(member[5]);
+        DecodeLzma(member[HeaderSize..^TrailerSize], dictSize, output, outputOffset, outputLength);
+
+        uint expected = BinaryPrimitives.ReadUInt32LittleEndian(member[^TrailerSize..]);
+        uint actual = LzipFraming.Crc32(output.AsSpan(outputOffset, outputLength));
+        if (actual != expected)
+        {
+            throw new InvalidDataException($"lzip member CRC mismatch (trailer 0x{expected:X8}, data 0x{actual:X8}): the data is corrupt.");
+        }
     }
 
     private readonly record struct MemberInfo(int Offset, int Length, long DataSize);
@@ -144,16 +185,17 @@ public static class LzipDecoder
             }
 
             long memberSize = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(end - 8, 8));
-            int memberStart = end - (int)memberSize;
 
-            if (memberStart < offset || memberSize < MinMemberSize)
+            // compared as a long BEFORE the cast: 0x1_FFFF_FFF0 truncates to -16 and put the start past the end
+            if (memberSize < MinMemberSize || memberSize > end - offset)
             {
                 throw new InvalidDataException($"Invalid lzip member size: {memberSize}.");
             }
 
+            int memberStart = end - (int)memberSize;
             ValidateHeader(data, memberStart);
 
-            long dataSize = BinaryPrimitives.ReadInt64LittleEndian(data.AsSpan(end - 16, 8));
+            long dataSize = ReadDataSize(data.AsSpan(memberStart, (int)memberSize));
             members.Add(new MemberInfo(memberStart, (int)memberSize, dataSize));
 
             end = memberStart;
@@ -185,7 +227,7 @@ public static class LzipDecoder
     private static uint DecodeDictSize(byte ds) => LzipFraming.DecodeDictSize(ds);
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private static void DecodeLzma(ReadOnlySpan<byte> input, byte[] output, int outputOffset, int outputLength)
+    private static void DecodeLzma(ReadOnlySpan<byte> input, uint dictSize, byte[] output, int outputOffset, int outputLength)
     {
         // lzip fixed LZMA properties
         const int lc = 3, lp = 0, pb = 2;
@@ -230,7 +272,7 @@ public static class LzipDecoder
 
         // Initialize range decoder
         int inPos = 0;
-        if (input[inPos++] != 0)
+        if (NextByte(input, ref inPos) != 0)
         {
             throw new InvalidDataException("Invalid LZMA stream (first byte must be 0).");
         }
@@ -238,7 +280,7 @@ public static class LzipDecoder
         uint code = 0;
         for (int i = 0; i < 4; i++)
         {
-            code = (code << 8) | input[inPos++];
+            code = (code << 8) | NextByte(input, ref inPos);
         }
 
         uint range = 0xFFFFFFFF;
@@ -249,13 +291,49 @@ public static class LzipDecoder
         int outPos = outputOffset;
         int outEnd = outputOffset + outputLength;
 
-        while (outPos < outEnd)
+        // A cut or corrupt stream must fail as InvalidDataException, not as an index check, but a bounds check on
+        // every byte DecodeBit reads cost a third of the decode (measured over TianWen's catalogues). So the loop reads the
+        // member's own bytes while a whole symbol's worth is left, and the last few from a zero-padded copy, checking
+        // once per symbol. A symbol reads at most a byte per bit: isMatch, isRep, 10 length, 6 slot, 26 direct and
+        // 4 align bits.
+        const int MaxBytesPerSymbol = 48;
+        int inLength = input.Length;
+        int inBase = 0; // where `input` starts in the member's stream: 0, then the tail copy's start
+        int inLimit = inLength - MaxBytesPerSymbol; // a symbol starting at or before this reads no byte past the end
+        bool inTail = false;
+
+        // Decoded to the end-of-stream marker, which every lzip member carries, never to the trailer's data size:
+        // a stream that would write past that size, or end short of it, is corrupt, and so is a distance reaching
+        // back before the member's first byte
+        while (true)
         {
+            if (inPos > inLimit)
+            {
+                int rest = input.Length - inPos;
+                if (inTail || rest < 0)
+                {
+                    throw new InvalidDataException("Truncated LZMA stream: it runs past its member's end.");
+                }
+
+                byte[] tail = new byte[rest + MaxBytesPerSymbol];
+                input[inPos..].CopyTo(tail);
+                input = tail;
+                inBase += inPos;
+                inPos = 0;
+                inLimit = rest;
+                inTail = true;
+            }
+
             int relPos = outPos - outputOffset;
             int posState = relPos & posMask;
 
             if (DecodeBit(probs, oIsMatch + state * numPosStates + posState, ref range, ref code, input, ref inPos) == 0)
             {
+                if (outPos == outEnd)
+                {
+                    throw LongerThanItsTrailer(outputLength);
+                }
+
                 // Literal
                 int prevByte = outPos > outputOffset ? output[outPos - 1] : 0;
                 int litState = ((relPos & ((1 << lp) - 1)) << lc) | (prevByte >> (8 - lc));
@@ -342,7 +420,17 @@ public static class LzipDecoder
 
                     if (rep0 == 0xFFFFFFFF)
                     {
+                        if (len != kMatchMinLen)
+                        {
+                            // len 3 is lzlib's sync flush marker, which lzip itself never writes
+                            throw new InvalidDataException($"Unsupported LZMA marker (length {len}).");
+                        }
                         break; // End of stream marker
+                    }
+
+                    if (rep0 >= dictSize)
+                    {
+                        throw new InvalidDataException($"LZMA distance {rep0 + 1} exceeds the member's dictionary of {dictSize} bytes.");
                     }
 
                     state = state < 7 ? 7 : 10;
@@ -354,6 +442,14 @@ public static class LzipDecoder
                         if (DecodeBit(probs, oIsRep0Long + state * numPosStates + posState, ref range, ref code, input, ref inPos) == 0)
                         {
                             // ShortRep: single byte at rep0 distance
+                            if (outPos == outEnd)
+                            {
+                                throw LongerThanItsTrailer(outputLength);
+                            }
+                            if (rep0 >= (uint)relPos)
+                            {
+                                throw BeforeTheFirstByte(rep0, relPos);
+                            }
                             state = state < 7 ? 9 : 11;
                             output[outPos] = output[outPos - (int)rep0 - 1];
                             outPos++;
@@ -390,8 +486,17 @@ public static class LzipDecoder
                 }
 
                 // Copy match bytes from dictionary
+                if (rep0 >= (uint)relPos)
+                {
+                    throw BeforeTheFirstByte(rep0, relPos);
+                }
+                if (len > (uint)(outEnd - outPos))
+                {
+                    throw LongerThanItsTrailer(outputLength);
+                }
+
                 int dist = (int)rep0 + 1;
-                int copyLen = (int)Math.Min(len, (uint)(outEnd - outPos));
+                int copyLen = (int)len;
 
                 if (dist >= copyLen)
                 {
@@ -410,6 +515,33 @@ public static class LzipDecoder
                 }
             }
         }
+
+        if (outPos != outEnd)
+        {
+            throw new InvalidDataException($"lzip member ends after {outPos - outputOffset} bytes; its trailer says {outputLength}.");
+        }
+
+        // The range decoder reads exactly the bytes the encoder flushed, so a stream that ends before its member does
+        // leaves bytes the member size claims and nothing decoded (and one that ran past the end read zeros)
+        if (inBase + inPos != inLength)
+        {
+            throw new InvalidDataException($"lzip member size mismatch: the LZMA stream is {inBase + inPos} bytes, the member holds {inLength}.");
+        }
+    }
+
+    private static InvalidDataException LongerThanItsTrailer(int outputLength)
+        => new($"lzip member decodes to more than the {outputLength} bytes its trailer says.");
+
+    private static InvalidDataException BeforeTheFirstByte(uint rep0, int relPos)
+        => new($"LZMA distance {rep0 + 1} reaches back before the member's first byte (at byte {relPos}).");
+
+    // The range decoder's first five bytes, read before the loop's check: past the end reads zeros, so a member too
+    // short to hold them fails the size check as an InvalidDataException
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint NextByte(ReadOnlySpan<byte> input, ref int inPos)
+    {
+        int p = inPos++;
+        return (uint)p < (uint)input.Length ? input[p] : 0u;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]

@@ -119,18 +119,11 @@ public static class LzipEncoder
         int level = Math.Clamp(options.Level, 0, _levels.Length - 1);
         (int levelDict, int levelMll) = _levels[level];
 
-        long chosen;
-        if (options.DictionarySize is int explicitDict)
-        {
-            chosen = explicitDict;
-        }
-        else
-        {
-            // Cap the dictionary to the input size (as lzip does) so small members don't declare a
-            // needlessly large dictionary; never below the minimum.
-            long cap = Math.Max(dataLength, (long)LzipFraming.MinDictionarySize);
-            chosen = Math.Min(levelDict, cap);
-        }
+        // Cap the dictionary to the input size (as lzip does, for -s as for a level: its size is a LIMIT) so small
+        // members don't declare a needlessly large dictionary, nor the match finder allocate for one; never below the
+        // minimum.
+        long cap = Math.Max(dataLength, (long)LzipFraming.MinDictionarySize);
+        long chosen = Math.Min(options.DictionarySize ?? levelDict, cap);
 
         dictSize = (uint)Math.Clamp(chosen, LzipFraming.MinDictionarySize, LzipFraming.MaxDictionarySize);
         matchLenLimit = Math.Clamp(options.MatchLenLimit ?? levelMll, LzipFraming.MinMatchLenLimit, LzipFraming.MaxMatchLen);
@@ -160,11 +153,15 @@ public static class LzipEncoder
         true,              // EndMarker
     ];
 
+    // From the position to the end, leaving the stream at its end, whatever the stream, as
+    // LzipDecoder.Decompress(Stream) reads (a MemoryStream used to be read whole from offset 0, and left where it was)
     private static byte[] ReadAllBytes(Stream input)
     {
-        if (input is MemoryStream ms)
+        if (input.CanSeek)
         {
-            return ms.ToArray();
+            byte[] data = new byte[input.Length - input.Position];
+            input.ReadExactly(data);
+            return data;
         }
         using var buffer = new MemoryStream();
         input.CopyTo(buffer);

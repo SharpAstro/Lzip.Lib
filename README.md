@@ -26,9 +26,14 @@ byte[] data = LzipDecoder.Decompress(File.ReadAllBytes("catalog.lz"));
 using var stream = File.OpenRead("catalog.lz");
 byte[] fromStream = LzipDecoder.Decompress(stream);
 
-// Lazily as a stream:
-using var decompressed = LzipDecoder.DecompressToStream(File.OpenRead("catalog.lz"));
+// As a read-only MemoryStream (decoded whole before it returns; the input is not disposed):
+using var file = File.OpenRead("catalog.lz");
+using var decompressed = LzipDecoder.DecompressToStream(file);
 ```
+
+Every member is checked against its trailer as the reference `lzip` checks it (the CRC32 of the
+data, the data size and the member size), and corrupt input of any kind throws
+`InvalidDataException`.
 
 Multi-member lzip files (e.g. produced by `lzip -b`) are detected and decoded across cores
 automatically.

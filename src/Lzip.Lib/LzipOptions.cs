@@ -14,9 +14,9 @@ public sealed class LzipOptions
     public int Level { get; init; } = 9;
 
     /// <summary>
-    /// Explicit dictionary size in bytes (4 KiB .. 512 MiB), rounded up to the nearest
-    /// lzip-representable size. <c>null</c> derives it from <see cref="Level"/> and caps it to the
-    /// input size (as lzip does), so small inputs get a small dictionary.
+    /// Explicit dictionary size limit in bytes (4 KiB .. 512 MiB), rounded up to the nearest
+    /// lzip-representable size. <c>null</c> derives it from <see cref="Level"/>. Either way it is capped
+    /// to the input size (as lzip does with <c>-s</c>), so small inputs get a small dictionary.
     /// </summary>
     public int? DictionarySize { get; init; }
 

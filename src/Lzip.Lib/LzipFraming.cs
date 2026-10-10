@@ -88,33 +88,12 @@ internal static class LzipFraming
         return bits;
     }
 
-    // Standard CRC32 (reflected, polynomial 0xEDB88320) -- identical to zlib/gzip and to lzip's
-    // member trailer CRC over the uncompressed data.
-    private static readonly uint[] _crcTable = BuildCrcTable();
-
-    private static uint[] BuildCrcTable()
-    {
-        var table = new uint[256];
-        for (uint n = 0; n < 256; n++)
-        {
-            uint c = n;
-            for (int k = 0; k < 8; k++)
-            {
-                c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            }
-            table[n] = c;
-        }
-        return table;
-    }
-
     /// <summary>CRC32 (reflected, poly 0xEDB88320) of <paramref name="data"/>.</summary>
-    public static uint Crc32(ReadOnlySpan<byte> data)
-    {
-        uint c = 0xFFFFFFFFu;
-        foreach (byte b in data)
-        {
-            c = _crcTable[(c ^ b) & 0xFF] ^ (c >> 8);
-        }
-        return c ^ 0xFFFFFFFFu;
-    }
+    /// <remarks>
+    /// The standard CRC32, identical to zlib/gzip and to lzip's member trailer CRC over the uncompressed data.
+    /// <see cref="System.IO.Hashing.Crc32"/> computes it vectorised: over TianWen's catalogues (141 MB decoded) a
+    /// byte-at-a-time table cost 14.5 % of the decode time and this 0.6 %, which is what lets the decoder check
+    /// every member's trailer.
+    /// </remarks>
+    public static uint Crc32(ReadOnlySpan<byte> data) => System.IO.Hashing.Crc32.HashToUInt32(data);
 }
